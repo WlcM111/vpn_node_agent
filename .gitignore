@@ -1,0 +1,18 @@
+# secrets
+.env
+.env.local
+.env.node
+
+# build artifacts
+bin/
+dist/
+tmp/
+*.exe
+*.test
+*.out
+*.prof
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store

@@ -1,0 +1,16 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+RUN apk add --no-cache ca-certificates tzdata
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/vpn-node-agent ./cmd/vpn-node-agent
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -H -u 10001 appuser
+WORKDIR /app
+COPY --from=builder /out/vpn-node-agent ./vpn-node-agent
+RUN mkdir -p /var/lib/vpn-node-agent && chown -R appuser:appuser /var/lib/vpn-node-agent
+USER appuser
+ENTRYPOINT ["./vpn-node-agent"]

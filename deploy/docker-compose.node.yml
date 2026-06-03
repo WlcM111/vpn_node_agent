@@ -1,0 +1,30 @@
+# Запуск vpn-node-agent на VPN-ноде.
+# network_mode: host нужен, чтобы достучаться до Xray на 127.0.0.1:10085
+# и до центральной Kafka по race-src.com:19092.
+services:
+  vpn-node-agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.vpn-node-agent
+    container_name: vpn-node-agent
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NODE_ID: ${NODE_ID:?NODE_ID is required}
+      SERVER_KEY: ${SERVER_KEY:?SERVER_KEY is required}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?KAFKA_BROKERS is required}
+      XRAY_APPLY_MODE: ${XRAY_APPLY_MODE:-api}
+      XRAY_API_ADDR: ${XRAY_API_ADDR:-127.0.0.1:10085}
+      NODE_AGENT_STATE_PATH: ${NODE_AGENT_STATE_PATH:-/var/lib/vpn-node-agent/state.json}
+      NODE_AGENT_PENDING_PATH: ${NODE_AGENT_PENDING_PATH:-/var/lib/vpn-node-agent/pending_events.json}
+      NODE_AGENT_HEARTBEAT_INTERVAL: ${NODE_AGENT_HEARTBEAT_INTERVAL:-30s}
+      NODE_AGENT_APPLY_TIMEOUT: ${NODE_AGENT_APPLY_TIMEOUT:-10s}
+      NODE_AGENT_HTTP_ADDR: ${NODE_AGENT_HTTP_ADDR:-127.0.0.1:9091}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - /var/lib/vpn-node-agent:/var/lib/vpn-node-agent
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9091/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
