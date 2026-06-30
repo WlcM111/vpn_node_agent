@@ -21,6 +21,11 @@ type VPNNodeUserProfile struct {
 	Flow        string     `json:"flow,omitempty"`
 	Level       uint32     `json:"level"`
 	AccessUntil *time.Time `json:"access_until,omitempty"`
+	// Optional=true: профиль необязателен. Если на узле нет такого inbound
+	// (например, CDN-inbound не настроен), node-agent пропускает его без
+	// провала всей команды. Обязательные профили (основной доступ) при ошибке
+	// валят команду, как и раньше.
+	Optional bool `json:"optional,omitempty"`
 }
 
 type NodeSyncUserCommand struct {

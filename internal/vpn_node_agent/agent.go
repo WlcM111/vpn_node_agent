@@ -214,6 +214,15 @@ func (a *Agent) syncUser(ctx context.Context, cmd *kafkacontracts.NodeSyncUserCo
 
 	for _, p := range cmd.Profiles {
 		if err := a.xray.EnsureVLESSUser(ctx, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
+			// Опциональный профиль (например CDN) с несуществующим на этом узле
+			// inbound — не ошибка: пропускаем его, не валя всю команду. Узел без
+			// CDN-inbound просто не получает CDN-доступ, но основной профиль
+			// применяется штатно.
+			if p.Optional && isMissingInboundError(err) {
+				slog.Warn("vpn-node-agent optional profile skipped (inbound missing)",
+					"inbound", p.InboundTag, "email", p.Email)
+				continue
+			}
 			return err
 		}
 		a.state.Profiles[profileKey(p.InboundTag, p.Email)] = AppliedProfile{

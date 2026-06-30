@@ -135,3 +135,19 @@ func isIgnorableRemoveError(err error) bool {
 		strings.Contains(msg, "no such user") ||
 		strings.Contains(msg, "not a user")
 }
+
+// isMissingInboundError сообщает, что ошибка вызвана отсутствием inbound с таким
+// тегом на узле (Xray возвращает "handler not found" / "not enough information").
+// Используется для опциональных профилей (CDN): если CDN-inbound на узле нет,
+// такой профиль пропускается без провала всей команды.
+func isMissingInboundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "handler not found") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not enough information") ||
+		strings.Contains(msg, "unknown tag") ||
+		strings.Contains(msg, "no such inbound")
+}
