@@ -9,6 +9,7 @@ import (
 	"time"
 
 	proxyman "github.com/xtls/xray-core/app/proxyman/command"
+	statscmd "github.com/xtls/xray-core/app/stats/command"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/proxy/vless"
@@ -24,6 +25,7 @@ var ErrXrayUnavailable = errors.New("xray unavailable")
 type XrayController interface {
 	EnsureVLESSUser(ctx context.Context, inboundTag, email, vlessUUID, flow string, level uint32) error
 	RemoveVLESSUser(ctx context.Context, inboundTag, email string) error
+	QueryUserTraffic(ctx context.Context, email string) (UserTraffic, error)
 	Close() error
 }
 
@@ -34,9 +36,13 @@ func (d *DryRunXrayController) EnsureVLESSUser(_ context.Context, inboundTag, em
 	slog.Info("dry-run ensure user", "inbound", inboundTag, "email", email, "uuid", vlessUUID, "flow", flow, "level", level)
 	return nil
 }
+
 func (d *DryRunXrayController) RemoveVLESSUser(_ context.Context, inboundTag, email string) error {
 	slog.Info("dry-run remove user", "inbound", inboundTag, "email", email)
 	return nil
+}
+func (d *DryRunXrayController) QueryUserTraffic(_ context.Context, _ string) (UserTraffic, error) {
+	return UserTraffic{}, nil
 }
 func (d *DryRunXrayController) Close() error { return nil }
 
@@ -44,6 +50,7 @@ type APIXrayController struct {
 	addr   string
 	conn   *grpc.ClientConn
 	client proxyman.HandlerServiceClient
+	stats  statscmd.StatsServiceClient
 }
 
 func NewAPIXrayController(ctx context.Context, addr string) (*APIXrayController, error) {
@@ -56,7 +63,12 @@ func NewAPIXrayController(ctx context.Context, addr string) (*APIXrayController,
 	if err != nil {
 		return nil, fmt.Errorf("connect xray api %s: %w", addr, err)
 	}
-	return &APIXrayController{addr: addr, conn: conn, client: proxyman.NewHandlerServiceClient(conn)}, nil
+	return &APIXrayController{
+		addr:   addr,
+		conn:   conn,
+		client: proxyman.NewHandlerServiceClient(conn),
+		stats:  statscmd.NewStatsServiceClient(conn),
+	}, nil
 }
 
 func (c *APIXrayController) EnsureVLESSUser(ctx context.Context, inboundTag, email, vlessUUID, flow string, level uint32) error {
@@ -98,6 +110,48 @@ func (c *APIXrayController) RemoveVLESSUser(ctx context.Context, inboundTag, ema
 		return wrapXrayErr(fmt.Errorf("xray remove user inbound=%s email=%s: %w", inboundTag, email, err))
 	}
 	return nil
+}
+
+// UserTraffic — кумулятивный трафик пользователя (байты) из Xray Stats.
+type UserTraffic struct {
+	Uplink   int64
+	Downlink int64
+}
+
+// QueryUserTraffic возвращает кумулятивный трафик по email пользователя из Xray
+// Stats API. reset=false — счётчики НЕ сбрасываются (отдаём накопленное).
+// Если счётчика нет (пользователь не передавал трафик) — вернётся нулевое значение,
+// это не ошибка.
+func (c *APIXrayController) QueryUserTraffic(ctx context.Context, email string) (UserTraffic, error) {
+	if c.stats == nil {
+		return UserTraffic{}, fmt.Errorf("stats client not initialized")
+	}
+	up, err := c.queryStat(ctx, "user>>>"+email+">>>traffic>>>uplink")
+	if err != nil {
+		return UserTraffic{}, err
+	}
+	down, err := c.queryStat(ctx, "user>>>"+email+">>>traffic>>>downlink")
+	if err != nil {
+		return UserTraffic{}, err
+	}
+	return UserTraffic{Uplink: up, Downlink: down}, nil
+}
+
+// queryStat запрашивает один счётчик по имени. Отсутствие счётчика Xray отдаёт как
+// ошибку "not found" — трактуем как 0 (пользователь ещё не передавал трафика).
+func (c *APIXrayController) queryStat(ctx context.Context, name string) (int64, error) {
+	resp, err := c.stats.GetStats(ctx, &statscmd.GetStatsRequest{Name: name, Reset_: false})
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "not exist") {
+			return 0, nil
+		}
+		return 0, wrapXrayErr(fmt.Errorf("xray get stat %s: %w", name, err))
+	}
+	if resp == nil || resp.Stat == nil {
+		return 0, nil
+	}
+	return resp.Stat.Value, nil
 }
 
 func (c *APIXrayController) Close() error {

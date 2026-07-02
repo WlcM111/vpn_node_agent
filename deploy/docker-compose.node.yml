@@ -21,6 +21,7 @@ services:
       NODE_AGENT_APPLY_TIMEOUT: ${NODE_AGENT_APPLY_TIMEOUT:-10s}
       NODE_AGENT_HTTP_ADDR: ${NODE_AGENT_HTTP_ADDR:-127.0.0.1:9091}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_AGENT_TRAFFIC_INTERVAL: ${NODE_AGENT_TRAFFIC_INTERVAL:-60s}
     volumes:
       - /var/lib/vpn-node-agent:/var/lib/vpn-node-agent
     healthcheck:

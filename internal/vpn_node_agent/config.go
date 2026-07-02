@@ -16,6 +16,7 @@ type Config struct {
 	ApplyMode         string
 	StatePath         string
 	HeartbeatInterval time.Duration
+	TrafficInterval   time.Duration
 	ApplyTimeout      time.Duration
 	AgentVersion      string
 }
@@ -28,6 +29,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ApplyMode:         strings.ToLower(strings.TrimSpace(os.Getenv("XRAY_APPLY_MODE"))),
 		StatePath:         strings.TrimSpace(os.Getenv("NODE_AGENT_STATE_PATH")),
 		HeartbeatInterval: parseDurationEnv("NODE_AGENT_HEARTBEAT_INTERVAL", 30*time.Second),
+		TrafficInterval:   parseDurationEnv("NODE_AGENT_TRAFFIC_INTERVAL", 60*time.Second),
 		ApplyTimeout:      parseDurationEnv("NODE_AGENT_APPLY_TIMEOUT", 10*time.Second),
 		AgentVersion:      "vpn-node-agent/1.0.0",
 	}

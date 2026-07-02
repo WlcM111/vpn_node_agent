@@ -47,6 +47,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	cleanupTicker := time.NewTicker(5 * time.Minute)
 	defer cleanupTicker.Stop()
 
+	trafficInterval := a.cfg.TrafficInterval
+	if trafficInterval <= 0 {
+		trafficInterval = 60 * time.Second
+	}
+	trafficTicker := time.NewTicker(trafficInterval)
+	defer trafficTicker.Stop()
+
 	if a.pending != nil {
 		go a.pending.RunPublisher(ctx)
 	}
@@ -71,6 +78,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		case <-cleanupTicker.C:
 			a.cleanupSeenCommands()
+		case <-trafficTicker.C:
+			if err := a.publishTrafficStats(ctx); err != nil {
+				slog.Warn("vpn-node-agent traffic stats enqueue failed", "err", err)
+			}
 		}
 	}
 }
@@ -346,6 +357,71 @@ func (a *Agent) publishHeartbeat(_ context.Context) error {
 		XrayAPIAddr:  a.cfg.XrayAPIAddr,
 		AgentVersion: a.cfg.AgentVersion,
 		CreatedAt:    time.Now().UTC(),
+	}
+	return a.enqueue(a.cfg.NodeID, &event)
+}
+
+// publishTrafficStats собирает кумулятивный трафик по всем включённым профилям
+// узла (через Xray Stats API) и публикует пачкой в vpn.events. Дедуп по email:
+// у одного пользователя несколько профилей (основной + CDN) с ОДНИМ email, поэтому
+// достаточно запросить трафик по email один раз.
+func (a *Agent) publishTrafficStats(ctx context.Context) error {
+	// снимок нужных (email -> telegram_id) под локом, запросы к Xray — вне лока
+	a.mu.Lock()
+	type ue struct {
+		telegramID int64
+		email      string
+	}
+	seen := make(map[string]struct{}, len(a.state.Profiles))
+	targets := make([]ue, 0, len(a.state.Profiles))
+	for _, p := range a.state.Profiles {
+		if !p.Enabled || p.Email == "" {
+			continue
+		}
+		if _, ok := seen[p.Email]; ok {
+			continue
+		}
+		seen[p.Email] = struct{}{}
+		targets = append(targets, ue{telegramID: p.TelegramID, email: p.Email})
+	}
+	a.mu.Unlock()
+
+	if len(targets) == 0 {
+		return nil
+	}
+
+	items := make([]kafkacontracts.VPNNodeTrafficItem, 0, len(targets))
+	for _, t := range targets {
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		tr, err := a.xray.QueryUserTraffic(qctx, t.email)
+		cancel()
+		if err != nil {
+			if errors.Is(err, ErrXrayUnavailable) {
+				// Xray временно недоступен — прекращаем проход, попробуем в следующий тик
+				return err
+			}
+			slog.Warn("vpn-node-agent query traffic failed", "email", t.email, "err", err)
+			continue
+		}
+		// нулевой трафик тоже шлём — оркестратор увидит, что пользователь активен
+		items = append(items, kafkacontracts.VPNNodeTrafficItem{
+			TelegramID: t.telegramID,
+			Email:      t.email,
+			Uplink:     tr.Uplink,
+			Downlink:   tr.Downlink,
+		})
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	event := kafkacontracts.VPNNodeTrafficEvent{
+		Type:      kafkacontracts.VPNEventNodeTraffic,
+		NodeID:    a.cfg.NodeID,
+		ServerKey: a.cfg.ServerKey,
+		Items:     items,
+		CreatedAt: time.Now().UTC(),
 	}
 	return a.enqueue(a.cfg.NodeID, &event)
 }
