@@ -59,8 +59,27 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	go func() {
-		if err := a.consumeCommands(ctx); err != nil {
-			slog.Error("vpn-node-agent command consumer stopped", "err", err)
+		// Перезапуск-обёртка: если consumeCommands по любой причине завершился
+		// (не из-за отмены контекста) — ждём и запускаем заново. Это последняя
+		// линия обороны против «мёртвого навсегда» консьюмера после обрыва Kafka.
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			err := a.consumeCommands(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				slog.Error("vpn-node-agent command consumer exited, restarting", "err", err)
+			} else {
+				slog.Warn("vpn-node-agent command consumer returned nil unexpectedly, restarting")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
 		}
 	}()
 

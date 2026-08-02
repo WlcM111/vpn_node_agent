@@ -43,6 +43,26 @@ func (p *Producer) Close() error {
 	return p.writer.Close()
 }
 
+// Reset пересоздаёт внутренний writer с теми же брокерами. Нужен, когда writer
+// «залип» на устаревшем соединении (после рестарта Kafka/центра) и каждая запись
+// упирается в таймаут. Пересоздание сбрасывает кэш метаданных брокеров.
+func (p *Producer) Reset() {
+	if !p.enabled {
+		return
+	}
+	old := p.writer
+	p.writer = &kafkago.Writer{
+		Addr:                   old.Addr,
+		Balancer:               &kafkago.Hash{},
+		RequiredAcks:           kafkago.RequireAll,
+		BatchTimeout:           50 * time.Millisecond,
+		AllowAutoTopicCreation: false,
+	}
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
 func (p *Producer) PublishJSON(ctx context.Context, topic, key string, v any) error {
 	if !p.enabled || p.writer == nil {
 		return ErrDisabled

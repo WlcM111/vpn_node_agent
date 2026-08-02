@@ -17,10 +17,20 @@ type pendingEvent struct {
 	ID        int64           `json:"id"`
 	Topic     string          `json:"topic"`
 	Key       string          `json:"key"`
+	EventType string          `json:"event_type,omitempty"`
 	Payload   json.RawMessage `json:"payload"`
 	Attempts  int             `json:"attempts"`
 	NextAt    time.Time       `json:"next_at"`
 	CreatedAt time.Time       `json:"created_at"`
+}
+
+// ephemeralEventTypes — события, которые устаревают и которые можно отбрасывать,
+// если они провисели в очереди дольше TTL (см. RunPublisher). Heartbeat и traffic
+// отражают состояние на момент отправки; протухшими они бесполезны и лишь копятся.
+// Результаты sync/revoke и ошибки НЕ эфемерны — их терять нельзя.
+var ephemeralEventTypes = map[string]bool{
+	"vpn.node_heartbeat": true,
+	"vpn.node_traffic":   true,
 }
 
 type PendingQueue struct {
@@ -84,6 +94,12 @@ func (q *PendingQueue) Enqueue(topic, key string, payload any) error {
 	if err != nil {
 		return fmt.Errorf("marshal pending payload: %w", err)
 	}
+	// Достаём type из уже сериализованного payload (все события несут поле "type").
+	var probe struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.nextID++
@@ -91,6 +107,7 @@ func (q *PendingQueue) Enqueue(topic, key string, payload any) error {
 		ID:        q.nextID,
 		Topic:     topic,
 		Key:       key,
+		EventType: probe.Type,
 		Payload:   raw,
 		NextAt:    time.Now().UTC(),
 		CreatedAt: time.Now().UTC(),
@@ -110,11 +127,21 @@ func (q *PendingQueue) RunPublisher(ctx context.Context) {
 		case <-time.After(idle):
 		}
 
+		// TTL для эфемерных событий: heartbeat/traffic старше этого срока
+		// отбрасываем — они устарели и лишь копятся. Не эфемерные (sync/revoke/
+		// ошибки) держим всегда.
+		const ephemeralTTL = 5 * time.Minute
+
 		q.mu.Lock()
 		now := time.Now().UTC()
 		var due []pendingEvent
 		var keep []pendingEvent
+		dropped := 0
 		for _, it := range q.items {
+			if ephemeralEventTypes[it.EventType] && now.Sub(it.CreatedAt) > ephemeralTTL {
+				dropped++
+				continue
+			}
 			if it.NextAt.After(now) {
 				keep = append(keep, it)
 				continue
@@ -122,6 +149,13 @@ func (q *PendingQueue) RunPublisher(ctx context.Context) {
 			due = append(due, it)
 		}
 		q.mu.Unlock()
+
+		if dropped > 0 {
+			slog.Info("node-agent dropped stale ephemeral pending events", "count", dropped)
+			q.mu.Lock()
+			_ = q.saveLocked()
+			q.mu.Unlock()
+		}
 
 		if len(due) == 0 {
 			if idle < 2*time.Second {
@@ -132,6 +166,8 @@ func (q *PendingQueue) RunPublisher(ctx context.Context) {
 		idle = 200 * time.Millisecond
 
 		var stillPending []pendingEvent
+		consecutiveFail := 0
+		resetDone := false
 		for _, it := range due {
 			publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			err := q.producer.PublishJSON(publishCtx, it.Topic, it.Key, jsonRaw(it.Payload))
@@ -141,7 +177,19 @@ func (q *PendingQueue) RunPublisher(ctx context.Context) {
 				it.NextAt = now.Add(time.Duration(minInt(60, 1<<minInt(it.Attempts, 6))) * time.Second)
 				slog.Warn("node-agent pending publish failed", "topic", it.Topic, "attempts", it.Attempts, "err", err)
 				stillPending = append(stillPending, it)
+
+				// Серия подряд идущих неудач = writer, вероятно, залип на мёртвом
+				// соединении. Один раз за проход пересоздаём его, чтобы сбросить
+				// устаревший кэш брокеров. Следующий тик попробует уже свежий writer.
+				consecutiveFail++
+				if consecutiveFail >= 3 && !resetDone {
+					slog.Warn("node-agent resetting kafka writer after consecutive publish failures")
+					q.producer.Reset()
+					resetDone = true
+				}
+				continue
 			}
+			consecutiveFail = 0
 		}
 
 		q.mu.Lock()

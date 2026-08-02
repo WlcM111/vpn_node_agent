@@ -49,7 +49,18 @@ func RunConsumerWithDLT(ctx context.Context, reader *kafkago.Reader, serviceName
 			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				return nil
 			}
-			return err
+			// Транзиентная ошибка fetch (брокер недоступен, потеря координатора
+			// группы, rebalance после рестарта центра). НЕ убиваем цикл — kafka-go
+			// сам переустановит соединение при следующем FetchMessage. Небольшая
+			// пауза, чтобы не крутить busy-loop, и продолжаем.
+			slog.Warn("kafka fetch failed, will retry",
+				"service", serviceName, "err", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+			}
+			continue
 		}
 
 		attemptKey := msg.Topic + ":" + string(msg.Key) + ":" + time.Unix(0, msg.Time.UnixNano()).UTC().Format(time.RFC3339Nano)
@@ -60,7 +71,12 @@ func RunConsumerWithDLT(ctx context.Context, reader *kafkago.Reader, serviceName
 				_ = publishDLT(ctx, dltProducer, dltTopic, msg, serviceName, err)
 				delete(attempts, attemptKey)
 				if commitErr := reader.CommitMessages(ctx, msg); commitErr != nil {
-					return commitErr
+					if errors.Is(commitErr, context.Canceled) {
+						return nil
+					}
+					slog.Warn("kafka commit failed after skip, will retry",
+						"service", serviceName, "err", commitErr)
+					continue
 				}
 				continue
 			}
@@ -80,7 +96,12 @@ func RunConsumerWithDLT(ctx context.Context, reader *kafkago.Reader, serviceName
 				_ = publishDLT(ctx, dltProducer, dltTopic, msg, serviceName, err)
 				delete(attempts, attemptKey)
 				if commitErr := reader.CommitMessages(ctx, msg); commitErr != nil {
-					return commitErr
+					if errors.Is(commitErr, context.Canceled) {
+						return nil
+					}
+					slog.Warn("kafka commit failed after DLT, will retry",
+						"service", serviceName, "err", commitErr)
+					continue
 				}
 				continue
 			}
@@ -91,7 +112,20 @@ func RunConsumerWithDLT(ctx context.Context, reader *kafkago.Reader, serviceName
 
 		delete(attempts, attemptKey)
 		if err := reader.CommitMessages(ctx, msg); err != nil {
-			return err
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			// Коммит не прошёл (транзиентно). Не убиваем цикл: сообщение уже
+			// обработано (идемпотентно), при повторной доставке отсеётся дедупом
+			// по command_id / MarkProcessed. Пауза и продолжаем.
+			slog.Warn("kafka commit failed, will retry",
+				"service", serviceName, "err", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(2 * time.Second):
+			}
+			continue
 		}
 	}
 }
