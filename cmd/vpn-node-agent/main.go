@@ -29,8 +29,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startNodeHTTP(ctx, cfg)
-
 	producer := commonkafka.NewProducer(cfg.KafkaBrokers)
 	reader := commonkafka.NewReader(cfg.KafkaBrokers, commonkafka.TopicVPNCommands, "vpn-node-agent-"+cfg.NodeID)
 
@@ -63,6 +61,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// HTTP-сервер поднимаем ПОСЛЕ создания агента: эндпоинт аутентификации
+	// Hysteria обращается к состоянию агента, поэтому агент должен уже существовать.
+	startNodeHTTP(ctx, cfg, agent)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -79,7 +81,7 @@ func main() {
 	_ = agent.Stop()
 }
 
-func startNodeHTTP(ctx context.Context, cfg vpn_node_agent.Config) {
+func startNodeHTTP(ctx context.Context, cfg vpn_node_agent.Config, agent *vpn_node_agent.Agent) {
 	addr := strings.TrimSpace(os.Getenv("NODE_AGENT_HTTP_ADDR"))
 	if addr == "" {
 		addr = ":9091"
@@ -90,6 +92,11 @@ func startNodeHTTP(ctx context.Context, cfg vpn_node_agent.Config) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", commonmetrics.Handler())
+	// Аутентификация Hysteria2: сервер спрашивает агент при каждом подключении.
+	// Слушаем только на 127.0.0.1 (см. NODE_AGENT_HTTP_ADDR в compose ноды).
+	if agent != nil {
+		mux.HandleFunc("/hysteria/auth", agent.HysteriaAuthHandler())
+	}
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
