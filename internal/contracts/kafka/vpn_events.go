@@ -13,14 +13,30 @@ const (
 )
 
 type VPNNodeHeartbeatEvent struct {
-	Type         VPNEventType `json:"type"`
-	NodeID       string       `json:"node_id"`
-	ServerKey    string       `json:"server_key"`
-	Online       bool         `json:"online"`
-	AppliedUsers int          `json:"applied_users"`
-	XrayAPIAddr  string       `json:"xray_api_addr,omitempty"`
-	AgentVersion string       `json:"agent_version,omitempty"`
-	CreatedAt    time.Time    `json:"created_at"`
+	Type      VPNEventType `json:"type"`
+	NodeID    string       `json:"node_id"`
+	ServerKey string       `json:"server_key"`
+	Online    bool         `json:"online"`
+
+	// AppliedUsers — сколько учётных записей выдано на этой ноде.
+	// Это ёмкостная величина, а не показатель нагрузки.
+	AppliedUsers int `json:"applied_users"`
+
+	// OnlineUsers — сколько пользователей реально передавали данные за
+	// последний интервал сбора трафика. Именно это и есть нагрузка:
+	// выданная учётка ничего не стоит, пока по ней не идёт трафик.
+	OnlineUsers int `json:"online_users"`
+
+	// UplinkBps/DownlinkBps — скорость трафика ноды, посчитанная как
+	// разница суммарных счётчиков инбаундов между двумя heartbeat.
+	// Нужна, чтобы аллокатор видел, что нода упирается в канал, даже
+	// когда пользователей на ней немного.
+	UplinkBps   int64 `json:"uplink_bps"`
+	DownlinkBps int64 `json:"downlink_bps"`
+
+	XrayAPIAddr  string    `json:"xray_api_addr,omitempty"`
+	AgentVersion string    `json:"agent_version,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type VPNNodeUserSyncedEvent struct {

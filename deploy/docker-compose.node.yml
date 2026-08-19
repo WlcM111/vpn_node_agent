@@ -22,6 +22,9 @@ services:
       NODE_AGENT_HTTP_ADDR: ${NODE_AGENT_HTTP_ADDR:-127.0.0.1:9091}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_AGENT_TRAFFIC_INTERVAL: ${NODE_AGENT_TRAFFIC_INTERVAL:-60s}
+      # Инбаунды, по которым суммируется трафик ноды. Пусто = четыре
+      # стандартных тега.
+      NODE_AGENT_INBOUND_TAGS: ${NODE_AGENT_INBOUND_TAGS:-}
     volumes:
       - /var/lib/vpn-node-agent:/var/lib/vpn-node-agent
     healthcheck:

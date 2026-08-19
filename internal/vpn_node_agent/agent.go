@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -22,6 +23,10 @@ type Agent struct {
 	repo     *StateRepository
 	pending  *PendingQueue
 
+	// load — показатели нагрузки ноды: активные подключения и скорость
+	// трафика. Заполняется между heartbeat-ами, читается при их отправке.
+	load *loadStats
+
 	mu    sync.Mutex
 	state *AgentState
 }
@@ -31,7 +36,11 @@ func NewAgent(cfg Config, reader *kafkago.Reader, producer *commonkafka.Producer
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{cfg: cfg, reader: reader, producer: producer, xray: xray, repo: repo, pending: pending, state: state}, nil
+	// Показатели нагрузки: активные подключения и скорость трафика ноды.
+	loadTracker := newLoadStats(inboundTagsFromEnv(os.Getenv("NODE_AGENT_INBOUND_TAGS")))
+
+	return &Agent{cfg: cfg, reader: reader, producer: producer, xray: xray, repo: repo,
+		pending: pending, state: state, load: loadTracker}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -362,10 +371,20 @@ func (a *Agent) revokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUs
 	return revoked, nil
 }
 
-func (a *Agent) publishHeartbeat(_ context.Context) error {
+func (a *Agent) publishHeartbeat(ctx context.Context) error {
 	a.mu.Lock()
 	count := a.repo.CountEnabled(a.state)
 	a.mu.Unlock()
+
+	// Скорость трафика снимаем прямо здесь: heartbeat идёт чаще, чем сбор
+	// пользовательского трафика, и нагрузка на канал должна обновляться
+	// с той же частотой.
+	a.collectNodeTraffic(ctx)
+
+	onlineUsers, upBps, downBps := int(0), int64(0), int64(0)
+	if a.load != nil {
+		onlineUsers, upBps, downBps = a.load.snapshot()
+	}
 
 	event := kafkacontracts.VPNNodeHeartbeatEvent{
 		Type:         kafkacontracts.VPNEventNodeHeartbeat,
@@ -373,6 +392,9 @@ func (a *Agent) publishHeartbeat(_ context.Context) error {
 		ServerKey:    a.cfg.ServerKey,
 		Online:       true,
 		AppliedUsers: count,
+		OnlineUsers:  onlineUsers,
+		UplinkBps:    upBps,
+		DownlinkBps:  downBps,
 		XrayAPIAddr:  a.cfg.XrayAPIAddr,
 		AgentVersion: a.cfg.AgentVersion,
 		CreatedAt:    time.Now().UTC(),
@@ -429,6 +451,16 @@ func (a *Agent) publishTrafficStats(ctx context.Context) error {
 			Uplink:     tr.Uplink,
 			Downlink:   tr.Downlink,
 		})
+	}
+
+	// Срез суммарных счётчиков: пользователь, у которого сумма выросла с
+	// прошлого прохода, реально передавал данные — это и есть подключение.
+	if a.load != nil {
+		totals := make(map[string]int64, len(items))
+		for _, it := range items {
+			totals[it.Email] = it.Uplink + it.Downlink
+		}
+		a.load.observeUsers(totals)
 	}
 
 	if len(items) == 0 {

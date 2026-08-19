@@ -26,6 +26,9 @@ type XrayController interface {
 	EnsureVLESSUser(ctx context.Context, inboundTag, email, vlessUUID, flow string, level uint32) error
 	RemoveVLESSUser(ctx context.Context, inboundTag, email string) error
 	QueryUserTraffic(ctx context.Context, email string) (UserTraffic, error)
+	// QueryInboundTraffic возвращает суммарные счётчики одного инбаунда.
+	// Сумма по всем инбаундам даёт трафик ноды целиком.
+	QueryInboundTraffic(ctx context.Context, inboundTag string) (UserTraffic, error)
 	Close() error
 }
 
@@ -41,6 +44,10 @@ func (d *DryRunXrayController) RemoveVLESSUser(_ context.Context, inboundTag, em
 	slog.Info("dry-run remove user", "inbound", inboundTag, "email", email)
 	return nil
 }
+func (d *DryRunXrayController) QueryInboundTraffic(_ context.Context, _ string) (UserTraffic, error) {
+	return UserTraffic{}, nil
+}
+
 func (d *DryRunXrayController) QueryUserTraffic(_ context.Context, _ string) (UserTraffic, error) {
 	return UserTraffic{}, nil
 }
@@ -131,6 +138,26 @@ func (c *APIXrayController) QueryUserTraffic(ctx context.Context, email string) 
 		return UserTraffic{}, err
 	}
 	down, err := c.queryStat(ctx, "user>>>"+email+">>>traffic>>>downlink")
+	if err != nil {
+		return UserTraffic{}, err
+	}
+	return UserTraffic{Uplink: up, Downlink: down}, nil
+}
+
+// QueryInboundTraffic возвращает суммарные счётчики инбаунда.
+//
+// Требует включённых statsInboundUplink/statsInboundDownlink в policy.system
+// конфига Xray. Если счётчиков нет, queryStat отдаёт нули — нода просто
+// сообщит нулевую скорость, а не свалится.
+func (c *APIXrayController) QueryInboundTraffic(ctx context.Context, inboundTag string) (UserTraffic, error) {
+	if c.stats == nil {
+		return UserTraffic{}, fmt.Errorf("stats client not initialized")
+	}
+	up, err := c.queryStat(ctx, "inbound>>>"+inboundTag+">>>traffic>>>uplink")
+	if err != nil {
+		return UserTraffic{}, err
+	}
+	down, err := c.queryStat(ctx, "inbound>>>"+inboundTag+">>>traffic>>>downlink")
 	if err != nil {
 		return UserTraffic{}, err
 	}
