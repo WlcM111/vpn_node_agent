@@ -106,6 +106,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		case <-cleanupTicker.C:
 			a.cleanupSeenCommands()
+			a.forgetTrafficCounters()
 		case <-trafficTicker.C:
 			if err := a.publishTrafficStats(ctx); err != nil {
 				slog.Warn("vpn-node-agent traffic stats enqueue failed", "err", err)
@@ -160,6 +161,65 @@ func (a *Agent) isCommandSeen(commandID string) bool {
 	}
 	_, ok := a.state.SeenCommands[commandID]
 	return ok
+}
+
+// saveState сохраняет состояние агента на диск под общим локом.
+func (a *Agent) saveState() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.repo.Save(a.state)
+}
+
+// accumulateTraffic превращает показание Xray (кумулятив с момента ЕГО старта)
+// в монотонно неубывающий счётчик узла и возвращает итоговые значения.
+//
+// Падение показания относительно предыдущего означает рестарт Xray: прошлое
+// значение переносится в базу, и счёт продолжается с нуля. Без этого центр
+// получал откат счётчика, а с ним — навсегда замороженную цифру трафика.
+func (a *Agent) accumulateTraffic(email string, uplink, downlink int64) (int64, int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.state.Traffic == nil {
+		a.state.Traffic = map[string]TrafficCounter{}
+	}
+	c := a.state.Traffic[email]
+	if uplink < c.LastUplink {
+		c.BaseUplink += c.LastUplink
+	}
+	if downlink < c.LastDownlink {
+		c.BaseDownlink += c.LastDownlink
+	}
+	c.LastUplink = uplink
+	c.LastDownlink = downlink
+	c.UpdatedAt = time.Now().UTC()
+	a.state.Traffic[email] = c
+
+	return c.BaseUplink + c.LastUplink, c.BaseDownlink + c.LastDownlink
+}
+
+// forgetTrafficCounters убирает счётчики, для которых на узле больше нет ни
+// одного профиля: карта не должна расти бесконечно.
+func (a *Agent) forgetTrafficCounters() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.state.Traffic) == 0 {
+		return
+	}
+	alive := make(map[string]struct{}, len(a.state.Profiles))
+	for _, p := range a.state.Profiles {
+		alive[p.Email] = struct{}{}
+	}
+	changed := false
+	for email := range a.state.Traffic {
+		if _, ok := alive[email]; !ok {
+			delete(a.state.Traffic, email)
+			changed = true
+		}
+	}
+	if changed {
+		_ = a.repo.Save(a.state)
+	}
 }
 
 func (a *Agent) cleanupSeenCommands() {
@@ -444,13 +504,22 @@ func (a *Agent) publishTrafficStats(ctx context.Context) error {
 			slog.Warn("vpn-node-agent query traffic failed", "email", t.email, "err", err)
 			continue
 		}
-		// нулевой трафик тоже шлём — оркестратор увидит, что пользователь активен
+		// В центр уходит НЕ сырое показание Xray, а накопленное узлом значение:
+		// оно переживает рестарт Xray и потому монотонно. Нулевой трафик тоже
+		// шлём — оркестратор увидит, что пользователь активен.
+		totalUp, totalDown := a.accumulateTraffic(t.email, tr.Uplink, tr.Downlink)
 		items = append(items, kafkacontracts.VPNNodeTrafficItem{
 			TelegramID: t.telegramID,
 			Email:      t.email,
-			Uplink:     tr.Uplink,
-			Downlink:   tr.Downlink,
+			Uplink:     totalUp,
+			Downlink:   totalDown,
 		})
+	}
+
+	// Счётчики изменились — фиксируем их на диске, иначе рестарт агента
+	// потерял бы базу и накопленное начало бы считаться заново.
+	if err := a.saveState(); err != nil {
+		slog.Warn("vpn-node-agent save traffic counters failed", "err", err)
 	}
 
 	// Срез суммарных счётчиков: пользователь, у которого сумма выросла с

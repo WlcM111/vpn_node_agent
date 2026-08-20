@@ -22,7 +22,14 @@ func (r *StateRepository) Load(nodeID string) (*AgentState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	state := &AgentState{Version: currentStateVersion, NodeID: nodeID, Profiles: map[string]AppliedProfile{}, UpdatedAt: time.Now().UTC()}
+	state := &AgentState{
+		Version:      currentStateVersion,
+		NodeID:       nodeID,
+		Profiles:     map[string]AppliedProfile{},
+		SeenCommands: map[string]time.Time{},
+		Traffic:      map[string]TrafficCounter{},
+		UpdatedAt:    time.Now().UTC(),
+	}
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -51,6 +58,9 @@ func (r *StateRepository) Load(nodeID string) (*AgentState, error) {
 	if state.SeenCommands == nil {
 		state.SeenCommands = map[string]time.Time{}
 	}
+	if state.Traffic == nil {
+		state.Traffic = map[string]TrafficCounter{}
+	}
 	state.NodeID = nodeID
 	state.Version = currentStateVersion
 	return state, nil
@@ -65,6 +75,9 @@ func (r *StateRepository) Save(state *AgentState) error {
 	}
 	if state.SeenCommands == nil {
 		state.SeenCommands = map[string]time.Time{}
+	}
+	if state.Traffic == nil {
+		state.Traffic = map[string]TrafficCounter{}
 	}
 	state.Version = currentStateVersion
 	state.UpdatedAt = time.Now().UTC()

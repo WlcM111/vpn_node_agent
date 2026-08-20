@@ -16,6 +16,24 @@ type AppliedProfile struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
+// TrafficCounter — накопленный трафик одного пользователя на ЭТОМ узле.
+//
+// Xray отдаёт счётчик, накопленный с момента СВОЕГО старта, и обнуляет его при
+// перезапуске. Если отдавать это значение как есть, центр видит откат счётчика
+// и «замирает» на прежнем максимуме. Поэтому агент хранит две части:
+//
+//	Base — сумма всех предыдущих «жизней» Xray;
+//	Last — последнее показание текущей.
+//
+// Наружу уходит Base+Last, то есть монотонно неубывающая величина.
+type TrafficCounter struct {
+	BaseUplink   int64     `json:"base_uplink"`
+	BaseDownlink int64     `json:"base_downlink"`
+	LastUplink   int64     `json:"last_uplink"`
+	LastDownlink int64     `json:"last_downlink"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 const currentStateVersion = 2
 
 type AgentState struct {
@@ -23,7 +41,11 @@ type AgentState struct {
 	NodeID       string                    `json:"node_id"`
 	Profiles     map[string]AppliedProfile `json:"profiles"`
 	SeenCommands map[string]time.Time      `json:"seen_commands,omitempty"`
-	UpdatedAt    time.Time                 `json:"updated_at"`
+	// Traffic — счётчики трафика по email пользователя. Поле опциональное:
+	// версия состояния не меняется, старые state.json читаются как есть
+	// (карта просто инициализируется пустой).
+	Traffic   map[string]TrafficCounter `json:"traffic,omitempty"`
+	UpdatedAt time.Time                 `json:"updated_at"`
 }
 
 func profileKey(inboundTag, email string) string {
