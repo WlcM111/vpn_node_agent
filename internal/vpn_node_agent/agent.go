@@ -394,18 +394,41 @@ func (a *Agent) revokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUs
 		}
 	}
 
-	targets := cmd.Profiles
-	if len(targets) == 0 {
-		for _, existing := range a.state.Profiles {
-			if existing.TelegramID == cmd.TelegramID {
-				targets = append(targets, kafkacontracts.VPNNodeUserProfile{
-					ItemKey:    existing.ItemKey,
-					InboundTag: existing.InboundTag,
-					Email:      existing.Email,
-					VLESSUUID:  existing.VLESSUUID,
-				})
-			}
+	// Отзыв обязан быть тотальным: пользователь теряет доступ к узлу целиком,
+	// а не только к тем inbound'ам, что попали в команду. Список профилей в
+	// команде строится по ТЕКУЩЕЙ конфигурации эндпоинтов, и если эндпоинт
+	// отвязали от узла (CDN переехал на другую ноду), профиль в команду не
+	// попадёт — а регистрация в inbound на узле останется, и отозванный
+	// пользователь продолжит через него ходить.
+	//
+	// Поэтому объединяем присланный список со ВСЕМИ профилями пользователя,
+	// которые узел знает про себя, и дедуплицируем по (inbound_tag, email).
+	targets := make([]kafkacontracts.VPNNodeUserProfile, 0, len(cmd.Profiles)+4)
+	seenTargets := make(map[string]struct{}, len(cmd.Profiles)+4)
+	addTarget := func(p kafkacontracts.VPNNodeUserProfile) {
+		if p.InboundTag == "" || p.Email == "" {
+			return
 		}
+		key := profileKey(p.InboundTag, p.Email)
+		if _, dup := seenTargets[key]; dup {
+			return
+		}
+		seenTargets[key] = struct{}{}
+		targets = append(targets, p)
+	}
+	for _, p := range cmd.Profiles {
+		addTarget(p)
+	}
+	for _, existing := range a.state.Profiles {
+		if existing.TelegramID != cmd.TelegramID {
+			continue
+		}
+		addTarget(kafkacontracts.VPNNodeUserProfile{
+			ItemKey:    existing.ItemKey,
+			InboundTag: existing.InboundTag,
+			Email:      existing.Email,
+			VLESSUUID:  existing.VLESSUUID,
+		})
 	}
 
 	revoked := 0
