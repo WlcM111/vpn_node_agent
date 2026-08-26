@@ -40,6 +40,22 @@ type NodeSyncUserCommand struct {
 	CreatedAt   time.Time            `json:"created_at"`
 }
 
+// RevokeScope — область действия команды отзыва.
+//
+// Пустое значение и RevokeScopeAll означают «пользователь теряет узел целиком»:
+// агент объединяет присланный список со всеми известными ему профилями этого
+// пользователя. Это поведение по умолчанию и оно не меняется.
+//
+// RevokeScopeListedProfiles отзывает РОВНО перечисленные профили и ничего
+// больше. Нужен для частичных отключений — например, при исчерпании CDN-квоты
+// снимается только CDN-учётка, а основной доступ продолжает работать.
+type RevokeScope string
+
+const (
+	RevokeScopeAll            RevokeScope = ""
+	RevokeScopeListedProfiles RevokeScope = "listed_profiles"
+)
+
 type NodeRevokeUserCommand struct {
 	Type       VPNCommandType       `json:"type"`
 	CommandID  string               `json:"command_id"`
@@ -48,6 +64,7 @@ type NodeRevokeUserCommand struct {
 	TelegramID int64                `json:"telegram_id"`
 	AccessRev  int64                `json:"access_rev"`
 	Reason     string               `json:"reason,omitempty"`
+	Scope      RevokeScope          `json:"scope,omitempty"`
 	Profiles   []VPNNodeUserProfile `json:"profiles,omitempty"`
 	CreatedAt  time.Time            `json:"created_at"`
 }

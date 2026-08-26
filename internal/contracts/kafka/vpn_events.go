@@ -74,13 +74,23 @@ type VPNNodeErrorEvent struct {
 	CreatedAt time.Time    `json:"created_at"`
 }
 
-// VPNNodeTrafficItem — кумулятивный трафик одного пользователя на узле (байты),
+// VPNNodeTrafficItem — кумулятивный трафик одной УЧЁТНОЙ ЗАПИСИ на узле (байты),
 // как их отдаёт Xray Stats API (с момента старта Xray, без сброса).
+//
+// Ключ измерения — email: Xray ведёт счётчик user>>><email>>>>traffic>>>*, то
+// есть по учётке, а не по инбаунду. Поэтому разделить CDN и не-CDN трафик можно
+// только раздав им РАЗНЫЕ email (см. cdnEmail в оркестраторе).
 type VPNNodeTrafficItem struct {
 	TelegramID int64  `json:"telegram_id"`
 	Email      string `json:"email"`
 	Uplink     int64  `json:"uplink"`
 	Downlink   int64  `json:"downlink"`
+
+	// InboundTag — инбаунд, которому принадлежит эта учётка на узле.
+	// Заполняется агентом из его собственного состояния (state.Profiles), а не
+	// из данных клиента. Пустое значение = агент старой версии: центр обязан
+	// считать такой трафик НЕклассифицированным и не относить его к CDN-квоте.
+	InboundTag string `json:"inbound_tag,omitempty"`
 }
 
 // VPNNodeTrafficEvent — пачка трафика по всем активным пользователям узла за один

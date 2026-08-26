@@ -388,13 +388,32 @@ func (a *Agent) revokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUs
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	for _, existing := range a.state.Profiles {
-		if existing.TelegramID == cmd.TelegramID && existing.AccessRev > cmd.AccessRev {
+	// Anti-rollback: не откатываем состояние более старой командой. Проверка
+	// применяется только к тем профилям, которых команда реально касается —
+	// иначе свежий sync основного профиля навсегда заблокировал бы отзыв
+	// CDN-учётки по квоте.
+	for key, existing := range a.state.Profiles {
+		if existing.TelegramID != cmd.TelegramID {
+			continue
+		}
+		if cmd.Scope == kafkacontracts.RevokeScopeListedProfiles {
+			affected := false
+			for _, p := range cmd.Profiles {
+				if profileKey(p.InboundTag, p.Email) == key {
+					affected = true
+					break
+				}
+			}
+			if !affected {
+				continue
+			}
+		}
+		if existing.AccessRev > cmd.AccessRev {
 			return 0, nil
 		}
 	}
 
-	// Отзыв обязан быть тотальным: пользователь теряет доступ к узлу целиком,
+	// Отзыв по умолчанию тотальный: пользователь теряет доступ к узлу целиком,
 	// а не только к тем inbound'ам, что попали в команду. Список профилей в
 	// команде строится по ТЕКУЩЕЙ конфигурации эндпоинтов, и если эндпоинт
 	// отвязали от узла (CDN переехал на другую ноду), профиль в команду не
@@ -403,6 +422,14 @@ func (a *Agent) revokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUs
 	//
 	// Поэтому объединяем присланный список со ВСЕМИ профилями пользователя,
 	// которые узел знает про себя, и дедуплицируем по (inbound_tag, email).
+	//
+	// Исключение — Scope=listed_profiles: частичное отключение (исчерпана
+	// CDN-квота). Тогда снимаем РОВНО перечисленные профили, иначе снятие
+	// CDN-учётки унесло бы с собой основной доступ пользователя.
+	listedOnly := cmd.Scope == kafkacontracts.RevokeScopeListedProfiles
+	if listedOnly && len(cmd.Profiles) == 0 {
+		return 0, fmt.Errorf("listed_profiles scope with empty profiles")
+	}
 	targets := make([]kafkacontracts.VPNNodeUserProfile, 0, len(cmd.Profiles)+4)
 	seenTargets := make(map[string]struct{}, len(cmd.Profiles)+4)
 	addTarget := func(p kafkacontracts.VPNNodeUserProfile) {
@@ -419,16 +446,18 @@ func (a *Agent) revokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUs
 	for _, p := range cmd.Profiles {
 		addTarget(p)
 	}
-	for _, existing := range a.state.Profiles {
-		if existing.TelegramID != cmd.TelegramID {
-			continue
+	if !listedOnly {
+		for _, existing := range a.state.Profiles {
+			if existing.TelegramID != cmd.TelegramID {
+				continue
+			}
+			addTarget(kafkacontracts.VPNNodeUserProfile{
+				ItemKey:    existing.ItemKey,
+				InboundTag: existing.InboundTag,
+				Email:      existing.Email,
+				VLESSUUID:  existing.VLESSUUID,
+			})
 		}
-		addTarget(kafkacontracts.VPNNodeUserProfile{
-			ItemKey:    existing.ItemKey,
-			InboundTag: existing.InboundTag,
-			Email:      existing.Email,
-			VLESSUUID:  existing.VLESSUUID,
-		})
 	}
 
 	revoked := 0
@@ -486,27 +515,46 @@ func (a *Agent) publishHeartbeat(ctx context.Context) error {
 }
 
 // publishTrafficStats собирает кумулятивный трафик по всем включённым профилям
-// узла (через Xray Stats API) и публикует пачкой в vpn.events. Дедуп по email:
-// у одного пользователя несколько профилей (основной + CDN) с ОДНИМ email, поэтому
-// достаточно запросить трафик по email один раз.
+// узла (через Xray Stats API) и публикует пачкой в vpn.events.
+//
+// Единица измерения — УЧЁТКА (email), потому что Xray ведёт счётчик
+// user>>><email>>>>traffic>>>*, то есть по учётке, а не по инбаунду. Раньше
+// профили одного пользователя (основной + CDN) делили один email, и трафик
+// разных транспортов был физически неразделим. Теперь оркестратор выдаёт
+// CDN-профилю собственный email, поэтому дедуп идёт по email и вместе с
+// каждым значением уходит его inbound_tag — центр по нему и классифицирует
+// трафик, не догадываясь по имени.
+//
+// Если один и тот же email всё-таки встретился в двух инбаундах (основной и
+// gRPC-профиль делят учётку), inbound_tag не отправляем: неоднозначный трафик
+// центр обязан оставить неклассифицированным, а не записать в CDN-квоту.
 func (a *Agent) publishTrafficStats(ctx context.Context) error {
-	// снимок нужных (email -> telegram_id) под локом, запросы к Xray — вне лока
+	// снимок нужных учёток под локом, запросы к Xray — вне лока
 	a.mu.Lock()
 	type ue struct {
 		telegramID int64
 		email      string
+		inboundTag string
 	}
-	seen := make(map[string]struct{}, len(a.state.Profiles))
-	targets := make([]ue, 0, len(a.state.Profiles))
+	byEmail := make(map[string]*ue, len(a.state.Profiles))
+	order := make([]string, 0, len(a.state.Profiles))
 	for _, p := range a.state.Profiles {
 		if !p.Enabled || p.Email == "" {
 			continue
 		}
-		if _, ok := seen[p.Email]; ok {
+		if prev, ok := byEmail[p.Email]; ok {
+			// email встретился в другом инбаунде — классификация неоднозначна
+			if prev.inboundTag != p.InboundTag {
+				prev.inboundTag = ""
+			}
 			continue
 		}
-		seen[p.Email] = struct{}{}
-		targets = append(targets, ue{telegramID: p.TelegramID, email: p.Email})
+		byEmail[p.Email] = &ue{telegramID: p.TelegramID, email: p.Email, inboundTag: p.InboundTag}
+		order = append(order, p.Email)
+	}
+	targets := make([]ue, 0, len(order))
+	for _, email := range order {
+		targets = append(targets, *byEmail[email])
 	}
 	a.mu.Unlock()
 
@@ -536,6 +584,7 @@ func (a *Agent) publishTrafficStats(ctx context.Context) error {
 			Email:      t.email,
 			Uplink:     totalUp,
 			Downlink:   totalDown,
+			InboundTag: t.inboundTag,
 		})
 	}
 
