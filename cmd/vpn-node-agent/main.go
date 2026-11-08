@@ -26,6 +26,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Kafka TLS/mTLS (KAFKA_TLS_*): неверная настройка — ошибка запуска, а не
+	// тихий откат на соединение без шифрования.
+	if err := commonkafka.TLSConfigError(); err != nil {
+		slog.Error("invalid kafka tls configuration", "err", err)
+		os.Exit(1)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -74,7 +81,7 @@ func main() {
 		}
 	}()
 
-	slog.Info("vpn-node-agent started", "node_id", cfg.NodeID, "server_key", cfg.ServerKey)
+	slog.Info("vpn-node-agent started", "node_id", cfg.NodeID, "server_key", cfg.ServerKey, "kafka_tls", commonkafka.TLSEnabled())
 	<-stop
 	slog.Info("shutting down vpn-node-agent")
 	cancel()

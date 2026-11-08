@@ -219,8 +219,9 @@ func isIgnorableRemoveError(err error) bool {
 
 // isMissingInboundError сообщает, что ошибка вызвана отсутствием inbound с таким
 // тегом на узле (Xray возвращает "handler not found" / "not enough information").
-// Используется для опциональных профилей (CDN): если CDN-inbound на узле нет,
-// такой профиль пропускается без провала всей команды.
+// Профиль такого inbound пропускается без провала всей команды: опциональный
+// (CDN, XHTTP) узлу не положен, обычный — из команды, выпущенной до удаления
+// inbound с узла (WS, gRPC).
 func isMissingInboundError(err error) bool {
 	if err == nil {
 		return false

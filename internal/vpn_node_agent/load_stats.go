@@ -2,6 +2,7 @@ package vpn_node_agent
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -119,13 +120,24 @@ func (l *loadStats) observeNodeTraffic(totalUp, totalDown int64, at time.Time) {
 }
 
 // collectNodeTraffic опрашивает счётчики всех инбаундов и обновляет скорость.
+//
+// Набор инбаундов — NODE_AGENT_INBOUND_TAGS, а если переменная пуста — теги
+// включённых профилей агента на момент замера. Профили приходят от центра,
+// поэтому список сам следует за конфигурацией ноды: инбаунд без пользователей
+// трафика не несёт, а новый транспорт попадает в замер вместе с первым
+// пользователем.
 func (a *Agent) collectNodeTraffic(ctx context.Context) {
 	if a.load == nil {
 		return
 	}
 
+	tags := a.load.inboundTags
+	if len(tags) == 0 {
+		tags = a.enabledInboundTags()
+	}
+
 	var totalUp, totalDown int64
-	for _, tag := range a.load.inboundTags {
+	for _, tag := range tags {
 		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		tr, err := a.xray.QueryInboundTraffic(qctx, tag)
 		cancel()
@@ -141,23 +153,37 @@ func (a *Agent) collectNodeTraffic(ctx context.Context) {
 	a.load.observeNodeTraffic(totalUp, totalDown, time.Now())
 }
 
-// inboundTagsFromEnv читает список инбаундов для подсчёта трафика ноды.
-// По умолчанию — четыре тега, которые используются на всех нодах.
+// inboundTagsFromEnv читает явно заданный список инбаундов для подсчёта
+// трафика ноды. Пустая переменная даёт пустой список: тогда инбаунды берутся
+// из включённых профилей агента (см. enabledInboundTags).
 func inboundTagsFromEnv(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return []string{
-			"vless-ws-in",
-			"vless-xhttp-cdn-in",
-			"vless-grpc-cdn-in",
-			"vless-ws-cdn-in",
-		}
-	}
 	var out []string
 	for _, p := range strings.Split(raw, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}
+	return out
+}
+
+// enabledInboundTags — различные теги инбаундов включённых профилей агента,
+// по алфавиту.
+func (a *Agent) enabledInboundTags() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	seen := make(map[string]struct{}, 4)
+	out := make([]string, 0, 4)
+	for _, p := range a.state.Profiles {
+		if !p.Enabled || p.InboundTag == "" {
+			continue
+		}
+		if _, ok := seen[p.InboundTag]; ok {
+			continue
+		}
+		seen[p.InboundTag] = struct{}{}
+		out = append(out, p.InboundTag)
+	}
+	sort.Strings(out)
 	return out
 }

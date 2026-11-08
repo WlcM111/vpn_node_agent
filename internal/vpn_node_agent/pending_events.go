@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,16 +34,27 @@ var ephemeralEventTypes = map[string]bool{
 	"vpn.node_traffic":   true,
 }
 
+// pendingPublisher — то, чем очередь публикует события (commonkafka.Producer).
+type pendingPublisher interface {
+	PublishJSON(ctx context.Context, topic, key string, v any) error
+	Reset()
+}
+
 type PendingQueue struct {
 	mu       sync.Mutex
 	path     string
 	items    []pendingEvent
 	nextID   int64
-	producer *commonkafka.Producer
+	producer pendingPublisher
 }
 
 func NewPendingQueue(path string, producer *commonkafka.Producer) (*PendingQueue, error) {
-	q := &PendingQueue{path: path, producer: producer}
+	q := &PendingQueue{path: path}
+	// nil-указатель не кладём в интерфейс: иначе проверка q.producer == nil
+	// в RunPublisher не сработает.
+	if producer != nil {
+		q.producer = producer
+	}
 	if err := q.load(); err != nil {
 		return nil, err
 	}
@@ -126,77 +138,108 @@ func (q *PendingQueue) RunPublisher(ctx context.Context) {
 			return
 		case <-time.After(idle):
 		}
-
-		// TTL для эфемерных событий: heartbeat/traffic старше этого срока
-		// отбрасываем — они устарели и лишь копятся. Не эфемерные (sync/revoke/
-		// ошибки) держим всегда.
-		const ephemeralTTL = 5 * time.Minute
-
-		q.mu.Lock()
-		now := time.Now().UTC()
-		var due []pendingEvent
-		var keep []pendingEvent
-		dropped := 0
-		for _, it := range q.items {
-			if ephemeralEventTypes[it.EventType] && now.Sub(it.CreatedAt) > ephemeralTTL {
-				dropped++
-				continue
-			}
-			if it.NextAt.After(now) {
-				keep = append(keep, it)
-				continue
-			}
-			due = append(due, it)
-		}
-		q.mu.Unlock()
-
-		if dropped > 0 {
-			slog.Info("node-agent dropped stale ephemeral pending events", "count", dropped)
-			q.mu.Lock()
-			_ = q.saveLocked()
-			q.mu.Unlock()
-		}
-
-		if len(due) == 0 {
+		if !q.publishOnce(ctx) {
 			if idle < 2*time.Second {
 				idle *= 2
 			}
 			continue
 		}
 		idle = 200 * time.Millisecond
-
-		var stillPending []pendingEvent
-		consecutiveFail := 0
-		resetDone := false
-		for _, it := range due {
-			publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err := q.producer.PublishJSON(publishCtx, it.Topic, it.Key, jsonRaw(it.Payload))
-			cancel()
-			if err != nil {
-				it.Attempts++
-				it.NextAt = now.Add(time.Duration(minInt(60, 1<<minInt(it.Attempts, 6))) * time.Second)
-				slog.Warn("node-agent pending publish failed", "topic", it.Topic, "attempts", it.Attempts, "err", err)
-				stillPending = append(stillPending, it)
-
-				// Серия подряд идущих неудач = writer, вероятно, залип на мёртвом
-				// соединении. Один раз за проход пересоздаём его, чтобы сбросить
-				// устаревший кэш брокеров. Следующий тик попробует уже свежий writer.
-				consecutiveFail++
-				if consecutiveFail >= 3 && !resetDone {
-					slog.Warn("node-agent resetting kafka writer after consecutive publish failures")
-					q.producer.Reset()
-					resetDone = true
-				}
-				continue
-			}
-			consecutiveFail = 0
-		}
-
-		q.mu.Lock()
-		q.items = append(keep, stillPending...)
-		_ = q.saveLocked()
-		q.mu.Unlock()
 	}
+}
+
+// publishOnce — один проход публикации. Возвращает false, если публиковать
+// было нечего.
+func (q *PendingQueue) publishOnce(ctx context.Context) bool {
+	// TTL для эфемерных событий: heartbeat/traffic старше этого срока
+	// отбрасываем — они устарели и лишь копятся. Не эфемерные (sync/revoke/
+	// ошибки) держим всегда.
+	const ephemeralTTL = 5 * time.Minute
+
+	q.mu.Lock()
+	now := time.Now().UTC()
+	retained := make([]pendingEvent, 0, len(q.items))
+	var due []pendingEvent
+	dropped := 0
+	for _, it := range q.items {
+		if ephemeralEventTypes[it.EventType] && now.Sub(it.CreatedAt) > ephemeralTTL {
+			dropped++
+			continue
+		}
+		retained = append(retained, it)
+		if !it.NextAt.After(now) {
+			due = append(due, it)
+		}
+	}
+	if dropped > 0 {
+		q.items = retained
+		_ = q.saveLocked()
+	}
+	q.mu.Unlock()
+
+	if dropped > 0 {
+		slog.Info("node-agent dropped stale ephemeral pending events", "count", dropped)
+	}
+	if len(due) == 0 {
+		return false
+	}
+
+	var stillPending []pendingEvent
+	consecutiveFail := 0
+	resetDone := false
+	for _, it := range due {
+		publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := q.producer.PublishJSON(publishCtx, it.Topic, it.Key, jsonRaw(it.Payload))
+		cancel()
+		if err != nil {
+			it.Attempts++
+			it.NextAt = now.Add(time.Duration(minInt(60, 1<<minInt(it.Attempts, 6))) * time.Second)
+			slog.Warn("node-agent pending publish failed", "topic", it.Topic, "attempts", it.Attempts, "err", err)
+			stillPending = append(stillPending, it)
+
+			// Серия подряд идущих неудач = writer, вероятно, залип на мёртвом
+			// соединении. Один раз за проход пересоздаём его, чтобы сбросить
+			// устаревший кэш брокеров. Следующий тик попробует уже свежий writer.
+			consecutiveFail++
+			if consecutiveFail >= 3 && !resetDone {
+				slog.Warn("node-agent resetting kafka writer after consecutive publish failures")
+				q.producer.Reset()
+				resetDone = true
+			}
+			continue
+		}
+		consecutiveFail = 0
+	}
+
+	q.mu.Lock()
+	// Пока шла публикация, Enqueue мог добавить события: они уже в q.items и
+	// на диске. Раньше очередь перезаписывалась снимком начала прохода, и
+	// такие события пропадали — в том числе результаты sync/revoke.
+	q.items = mergePending(q.items, due, stillPending)
+	_ = q.saveLocked()
+	q.mu.Unlock()
+	return true
+}
+
+// mergePending возвращает очередь после прохода: из текущего содержимого
+// убираются события, взятые в проход, неудачные возвращаются с новым
+// расписанием, добавленные во время прохода остаются. Порядок — по ID, то
+// есть по времени постановки в очередь.
+func mergePending(current, taken, failed []pendingEvent) []pendingEvent {
+	takenIDs := make(map[int64]struct{}, len(taken))
+	for _, it := range taken {
+		takenIDs[it.ID] = struct{}{}
+	}
+	out := make([]pendingEvent, 0, len(current)+len(failed))
+	for _, it := range current {
+		if _, ok := takenIDs[it.ID]; ok {
+			continue
+		}
+		out = append(out, it)
+	}
+	out = append(out, failed...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 type jsonRaw []byte

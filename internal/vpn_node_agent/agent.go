@@ -313,13 +313,16 @@ func (a *Agent) syncUser(ctx context.Context, cmd *kafkacontracts.NodeSyncUserCo
 
 	for _, p := range cmd.Profiles {
 		if err := a.xray.EnsureVLESSUser(ctx, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
-			// Опциональный профиль (например CDN) с несуществующим на этом узле
-			// inbound — не ошибка: пропускаем его, не валя всю команду. Узел без
-			// CDN-inbound просто не получает CDN-доступ, но основной профиль
-			// применяется штатно.
-			if p.Optional && isMissingInboundError(err) {
-				slog.Warn("vpn-node-agent optional profile skipped (inbound missing)",
-					"inbound", p.InboundTag, "email", p.Email)
+			// Инбаунда профиля на узле нет — это не ошибка команды: профиль
+			// пропускается, остальные профили применяются штатно. Опциональный
+			// профиль (CDN, XHTTP) этому узлу просто не положен. Обычный профиль
+			// остаётся в командах, выпущенных до того, как инбаунд убрали с узла
+			// (WS и gRPC при переходе на Reality, XHTTP и Hysteria2): повтор
+			// такую команду не исправит, а задержал бы очередь узла — до 20
+			// попыток на каждую команду из накопившегося хвоста.
+			if isMissingInboundError(err) {
+				slog.Warn("vpn-node-agent profile skipped (inbound missing)",
+					"inbound", p.InboundTag, "email", p.Email, "optional", p.Optional)
 				continue
 			}
 			return err
@@ -525,8 +528,8 @@ func (a *Agent) publishHeartbeat(ctx context.Context) error {
 // каждым значением уходит его inbound_tag — центр по нему и классифицирует
 // трафик, не догадываясь по имени.
 //
-// Если один и тот же email всё-таки встретился в двух инбаундах (основной и
-// gRPC-профиль делят учётку), inbound_tag не отправляем: неоднозначный трафик
+// Если один и тот же email встретился в двух инбаундах (Reality- и
+// XHTTP-профиль делят учётку), inbound_tag не отправляем: неоднозначный трафик
 // центр обязан оставить неклассифицированным, а не записать в CDN-квоту.
 func (a *Agent) publishTrafficStats(ctx context.Context) error {
 	// снимок нужных учёток под локом, запросы к Xray — вне лока
@@ -636,6 +639,19 @@ func (a *Agent) reconcileState(ctx context.Context) error {
 		if err := a.xray.EnsureVLESSUser(ctx, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
 			if errors.Is(err, ErrXrayUnavailable) {
 				slog.Warn("vpn-node-agent reconcile skipped due to xray unavailable", "inbound", p.InboundTag, "email", p.Email)
+				continue
+			}
+			// Инбаунда больше нет на узле (например, убраны WS и gRPC): профиль
+			// выключается, а восстановление остальных пользователей после
+			// рестарта не обрывается. Выключенный профиль не участвует ни в
+			// аутентификации Hysteria, ни в сборе трафика, ни в счётчике
+			// heartbeat. Если инбаунд вернётся, центр снова включит профиль
+			// ближайшей командой синхронизации (reconcile — каждые 10 минут).
+			if isMissingInboundError(err) {
+				slog.Warn("vpn-node-agent reconcile disabled profile: inbound missing on node", "inbound", p.InboundTag, "email", p.Email)
+				p.Enabled = false
+				p.UpdatedAt = time.Now().UTC()
+				a.state.Profiles[profileKey(p.InboundTag, p.Email)] = p
 				continue
 			}
 			return err

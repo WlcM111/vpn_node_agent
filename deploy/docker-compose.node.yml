@@ -22,11 +22,20 @@ services:
       NODE_AGENT_HTTP_ADDR: ${NODE_AGENT_HTTP_ADDR:-127.0.0.1:9091}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_AGENT_TRAFFIC_INTERVAL: ${NODE_AGENT_TRAFFIC_INTERVAL:-60s}
-      # Инбаунды, по которым суммируется трафик ноды. Пусто = четыре
-      # стандартных тега.
+      # Инбаунды, по которым суммируется трафик ноды. Пусто = инбаунды
+      # включённых профилей агента.
       NODE_AGENT_INBOUND_TAGS: ${NODE_AGENT_INBOUND_TAGS:-}
+      # Kafka TLS/mTLS до центра (KAFKA_BROKERS:19092). Пусто — без шифрования,
+      # как раньше. Пути — внутри контейнера: каталог ниже монтируется с хоста
+      # (файлы должны читаться пользователем контейнера, UID 10001).
+      KAFKA_TLS_ENABLED: ${KAFKA_TLS_ENABLED:-}
+      KAFKA_TLS_CA_CERT: ${KAFKA_TLS_CA_CERT:-}
+      KAFKA_TLS_CLIENT_CERT: ${KAFKA_TLS_CLIENT_CERT:-}
+      KAFKA_TLS_CLIENT_KEY: ${KAFKA_TLS_CLIENT_KEY:-}
+      KAFKA_TLS_SERVER_NAME: ${KAFKA_TLS_SERVER_NAME:-}
     volumes:
       - /var/lib/vpn-node-agent:/var/lib/vpn-node-agent
+      - ${KAFKA_TLS_HOST_DIR:-/etc/vpn-node-agent/kafka-tls}:/etc/vpn-node-agent/kafka-tls:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9091/healthz || exit 1"]
       interval: 15s

@@ -22,3 +22,14 @@
 - NODE_AGENT_STATE_PATH, NODE_AGENT_PENDING_PATH — пути файлов состояния
 - NODE_AGENT_HEARTBEAT_INTERVAL, NODE_AGENT_APPLY_TIMEOUT
 - NODE_AGENT_HTTP_ADDR — адрес healthz/metrics (:9091)
+- NODE_AGENT_INBOUND_TAGS — инбаунды Xray через запятую, по которым считается
+  скорость трафика ноды для heartbeat; пусто — инбаунды включённых профилей агента
+- KAFKA_TLS_ENABLED — true/false; пусто — TLS включается сам, если задан любой путь ниже
+- KAFKA_TLS_CA_CERT — PEM-сертификат CA брокера центра
+- KAFKA_TLS_CLIENT_CERT, KAFKA_TLS_CLIENT_KEY — клиентский сертификат и ключ (mTLS)
+- KAFKA_TLS_SERVER_NAME — имя сервера в сертификате брокера, если отличается от адреса в KAFKA_BROKERS
+- KAFKA_TLS_HOST_DIR — каталог сертификатов на хосте для docker-compose.node.yml
+  (по умолчанию /etc/vpn-node-agent/kafka-tls, монтируется в тот же путь контейнера)
+
+Неверная настройка TLS — ошибка запуска агента, а не откат на соединение без
+шифрования.
