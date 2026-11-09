@@ -14,6 +14,10 @@ type AppliedProfile struct {
 	AccessUntil *time.Time `json:"access_until,omitempty"`
 	Enabled     bool       `json:"enabled"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// Protocol — протокол инбаунда (пусто — VLESS, "hysteria" — Hysteria2
+	// внутри Xray). Нужен, чтобы после рестарта агента вернуть учётку в
+	// инбаунд тем же типом. Старые state.json читаются как VLESS.
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // TrafficCounter — накопленный трафик одного пользователя на ЭТОМ узле.

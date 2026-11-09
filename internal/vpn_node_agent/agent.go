@@ -312,7 +312,15 @@ func (a *Agent) syncUser(ctx context.Context, cmd *kafkacontracts.NodeSyncUserCo
 	}
 
 	for _, p := range cmd.Profiles {
-		if err := a.xray.EnsureVLESSUser(ctx, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
+		if err := a.ensureUser(ctx, p.Protocol, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
+			// Протокол, которого этот агент не знает: опциональный профиль
+			// пропускается (как профиль инбаунда, которого нет), обязательный
+			// валит команду.
+			if errors.Is(err, errUnsupportedProtocol) && p.Optional {
+				slog.Warn("vpn-node-agent profile skipped (unsupported protocol)",
+					"inbound", p.InboundTag, "email", p.Email, "protocol", p.Protocol)
+				continue
+			}
 			// Инбаунда профиля на узле нет — это не ошибка команды: профиль
 			// пропускается, остальные профили применяются штатно. Опциональный
 			// профиль (CDN, XHTTP) этому узлу просто не положен. Обычный профиль
@@ -339,9 +347,27 @@ func (a *Agent) syncUser(ctx context.Context, cmd *kafkacontracts.NodeSyncUserCo
 			AccessUntil: p.AccessUntil,
 			Enabled:     true,
 			UpdatedAt:   time.Now().UTC(),
+			Protocol:    p.Protocol,
 		}
 	}
 	return a.repo.Save(a.state)
+}
+
+// errUnsupportedProtocol — профиль с протоколом инбаунда, который агент не
+// умеет регистрировать.
+var errUnsupportedProtocol = errors.New("unsupported inbound protocol")
+
+// ensureUser регистрирует учётку в инбаунде по протоколу профиля: VLESS (по
+// умолчанию) или Hysteria2 внутри Xray — паролем служит VLESS-UUID.
+func (a *Agent) ensureUser(ctx context.Context, protocol, inboundTag, email, vlessUUID, flow string, level uint32) error {
+	switch protocol {
+	case kafkacontracts.ProfileProtocolVLESS:
+		return a.xray.EnsureVLESSUser(ctx, inboundTag, email, vlessUUID, flow, level)
+	case kafkacontracts.ProfileProtocolHysteria:
+		return a.xray.EnsureHysteriaUser(ctx, inboundTag, email, vlessUUID, level)
+	default:
+		return fmt.Errorf("%w %q for inbound %s", errUnsupportedProtocol, protocol, inboundTag)
+	}
 }
 
 func (a *Agent) handleRevokeUser(ctx context.Context, cmd *kafkacontracts.NodeRevokeUserCommand) error {
@@ -636,7 +662,7 @@ func (a *Agent) reconcileState(ctx context.Context) error {
 			a.state.Profiles[profileKey(p.InboundTag, p.Email)] = p
 			continue
 		}
-		if err := a.xray.EnsureVLESSUser(ctx, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
+		if err := a.ensureUser(ctx, p.Protocol, p.InboundTag, p.Email, p.VLESSUUID, p.Flow, p.Level); err != nil {
 			if errors.Is(err, ErrXrayUnavailable) {
 				slog.Warn("vpn-node-agent reconcile skipped due to xray unavailable", "inbound", p.InboundTag, "email", p.Email)
 				continue
@@ -647,8 +673,8 @@ func (a *Agent) reconcileState(ctx context.Context) error {
 			// аутентификации Hysteria, ни в сборе трафика, ни в счётчике
 			// heartbeat. Если инбаунд вернётся, центр снова включит профиль
 			// ближайшей командой синхронизации (reconcile — каждые 10 минут).
-			if isMissingInboundError(err) {
-				slog.Warn("vpn-node-agent reconcile disabled profile: inbound missing on node", "inbound", p.InboundTag, "email", p.Email)
+			if isMissingInboundError(err) || errors.Is(err, errUnsupportedProtocol) {
+				slog.Warn("vpn-node-agent reconcile disabled profile: inbound missing on node or protocol unsupported", "inbound", p.InboundTag, "email", p.Email, "protocol", p.Protocol)
 				p.Enabled = false
 				p.UpdatedAt = time.Now().UTC()
 				a.state.Profiles[profileKey(p.InboundTag, p.Email)] = p

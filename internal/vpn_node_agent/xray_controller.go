@@ -12,6 +12,7 @@ import (
 	statscmd "github.com/xtls/xray-core/app/stats/command"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
+	hysteriaaccount "github.com/xtls/xray-core/proxy/hysteria/account"
 	"github.com/xtls/xray-core/proxy/vless"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,6 +25,11 @@ var ErrXrayUnavailable = errors.New("xray unavailable")
 
 type XrayController interface {
 	EnsureVLESSUser(ctx context.Context, inboundTag, email, vlessUUID, flow string, level uint32) error
+	// EnsureHysteriaUser регистрирует учётку в Hysteria2-инбаунде Xray: auth —
+	// пароль клиента (VLESS-UUID пользователя).
+	EnsureHysteriaUser(ctx context.Context, inboundTag, email, auth string, level uint32) error
+	// RemoveVLESSUser снимает учётку по email из инбаунда любого протокола
+	// (VLESS и Hysteria2): Xray удаляет пользователя по email.
 	RemoveVLESSUser(ctx context.Context, inboundTag, email string) error
 	QueryUserTraffic(ctx context.Context, email string) (UserTraffic, error)
 	// QueryInboundTraffic возвращает суммарные счётчики одного инбаунда.
@@ -37,6 +43,11 @@ type DryRunXrayController struct{}
 func NewDryRunXrayController() *DryRunXrayController { return &DryRunXrayController{} }
 func (d *DryRunXrayController) EnsureVLESSUser(_ context.Context, inboundTag, email, vlessUUID, flow string, level uint32) error {
 	slog.Info("dry-run ensure user", "inbound", inboundTag, "email", email, "uuid", vlessUUID, "flow", flow, "level", level)
+	return nil
+}
+
+func (d *DryRunXrayController) EnsureHysteriaUser(_ context.Context, inboundTag, email, _ string, level uint32) error {
+	slog.Info("dry-run ensure hysteria user", "inbound", inboundTag, "email", email, "level", level)
 	return nil
 }
 
@@ -100,6 +111,35 @@ func (c *APIXrayController) EnsureVLESSUser(ctx context.Context, inboundTag, ema
 	_, err := c.client.AlterInbound(ctx, &proxyman.AlterInboundRequest{Tag: inboundTag, Operation: serial.ToTypedMessage(op)})
 	if err != nil {
 		return wrapXrayErr(fmt.Errorf("xray add user inbound=%s email=%s: %w", inboundTag, email, err))
+	}
+	return nil
+}
+
+// EnsureHysteriaUser — то же, что EnsureVLESSUser, для Hysteria2-инбаунда
+// Xray: учётка с паролем auth (VLESS-UUID пользователя). Remove перед Add
+// делает операцию идемпотентной и обновляет пароль, если он сменился.
+func (c *APIXrayController) EnsureHysteriaUser(ctx context.Context, inboundTag, email, auth string, level uint32) error {
+	if strings.TrimSpace(inboundTag) == "" {
+		return fmt.Errorf("empty inbound tag")
+	}
+	if strings.TrimSpace(email) == "" {
+		return fmt.Errorf("empty email")
+	}
+	if strings.TrimSpace(auth) == "" {
+		return fmt.Errorf("empty hysteria auth")
+	}
+
+	if err := c.RemoveVLESSUser(ctx, inboundTag, email); err != nil && !isIgnorableRemoveError(err) {
+		return fmt.Errorf("remove before add: %w", err)
+	}
+
+	account := &hysteriaaccount.Account{Auth: auth}
+	user := &protocol.User{Level: level, Email: email, Account: serial.ToTypedMessage(account)}
+	op := &proxyman.AddUserOperation{User: user}
+
+	_, err := c.client.AlterInbound(ctx, &proxyman.AlterInboundRequest{Tag: inboundTag, Operation: serial.ToTypedMessage(op)})
+	if err != nil {
+		return wrapXrayErr(fmt.Errorf("xray add hysteria user inbound=%s email=%s: %w", inboundTag, email, err))
 	}
 	return nil
 }

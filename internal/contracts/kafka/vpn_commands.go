@@ -26,7 +26,17 @@ type VPNNodeUserProfile struct {
 	// провала всей команды. Обязательные профили (основной доступ) при ошибке
 	// валят команду, как и раньше.
 	Optional bool `json:"optional,omitempty"`
+	// Protocol — протокол инбаунда Xray, куда регистрируется учётка: пусто —
+	// VLESS (как раньше), ProfileProtocolHysteria — Hysteria2-инбаунд Xray
+	// (нода-вход каскада). Пароль Hysteria2 — тот же VLESSUUID.
+	Protocol string `json:"protocol,omitempty"`
 }
+
+// Протоколы инбаунда для VPNNodeUserProfile.Protocol.
+const (
+	ProfileProtocolVLESS    = ""
+	ProfileProtocolHysteria = "hysteria"
+)
 
 type NodeSyncUserCommand struct {
 	Type        VPNCommandType       `json:"type"`
