@@ -21,6 +21,10 @@ import (
 // в состояние агента, поэтому отдельных учёток для Hysteria не требуется.
 // Отзыв доступа работает автоматически — центр выключает профиль, и UUID
 // перестаёт проходить проверку.
+//
+// Приватность: клиентский IP-адрес (req.Addr) намеренно НЕ записывается в логи,
+// Этот обработчик не пишет IP, UUID или идентификатор пользователя.
+// Настройки журналов Xray, nginx и Hysteria проверяются отдельно.
 // ============================================================================
 
 type hysteriaAuthRequest struct {
@@ -35,7 +39,7 @@ type hysteriaAuthResponse struct {
 }
 
 // AuthorizeHysteria ищет включённый профиль с указанным UUID.
-// Возвращает идентификатор клиента (email) для логов и статистики Hysteria.
+// Возвращает идентификатор клиента (email) для статистики Hysteria.
 func (a *Agent) AuthorizeHysteria(authPayload string) (string, bool) {
 	uuid := strings.TrimSpace(authPayload)
 	if uuid == "" {
@@ -77,12 +81,12 @@ func (a *Agent) HysteriaAuthHandler() http.HandlerFunc {
 
 		id, ok := a.AuthorizeHysteria(req.Auth)
 		if !ok {
-			slog.Warn("hysteria auth rejected", "addr", req.Addr)
+			slog.Debug("hysteria auth rejected")
 			writeHysteriaAuth(w, hysteriaAuthResponse{OK: false})
 			return
 		}
 
-		slog.Info("hysteria auth accepted", "addr", req.Addr, "id", id)
+		slog.Debug("hysteria auth accepted")
 		writeHysteriaAuth(w, hysteriaAuthResponse{OK: true, ID: id})
 	}
 }
